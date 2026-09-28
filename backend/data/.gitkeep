@@ -1,0 +1,2 @@
+# Place your trained detector.pt file in this directory after training.
+# Expected path: backend/data/detector.pt

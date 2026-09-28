@@ -1,0 +1,9 @@
+# Training metric plots and evaluation reports are written here by:
+#   python training/train.py
+#   python training/evaluate.py
+#
+# Expected outputs after training:
+#   training_loss.png
+#   validation_loss.png
+#   validation_accuracy.png
+#   evaluation_report.json

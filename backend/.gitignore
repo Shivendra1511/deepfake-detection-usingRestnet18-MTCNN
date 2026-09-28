@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+
+# Keep directories but ignore runtime uploads/extracted frames
+uploads/*
+!uploads/.gitkeep
+frames/*
+!frames/.gitkeep
+results/*
+!results/.gitkeep
+
+# Exclude generated model checkpoints from git if desired, but keep structure
+data/*.pt
+!data/.gitkeep
