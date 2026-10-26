@@ -73,6 +73,12 @@ def parse_args():
         default=True,
         help="Run MTCNN face extraction on dataset images (default: enabled). Use --no-extract_face to disable."
     )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="Where cached face crops are stored (default: <dataset_dir>/_face_cache). Delete it to re-extract faces."
+    )
     return parser.parse_args()
 
 def main():
@@ -107,17 +113,20 @@ def main():
 
     # 1. Initialize Datasets & DataLoaders
     print("\n[1/6] Loading datasets...")
+    cache_root = Path(args.cache_dir) if args.cache_dir else dataset_path / "_face_cache"
     train_dataset = DeepfakeDataset(
         root_dir=train_dir,
         transform=get_train_transforms(image_size=224),
         extract_face=args.extract_face,
-        device=device
+        device=device,
+        cache_dir=cache_root / "train"
     )
     val_dataset = DeepfakeDataset(
         root_dir=val_dir,
         transform=get_val_transforms(image_size=224),
         extract_face=args.extract_face,
-        device=device
+        device=device,
+        cache_dir=cache_root / "val"
     )
 
     if len(train_dataset) == 0:

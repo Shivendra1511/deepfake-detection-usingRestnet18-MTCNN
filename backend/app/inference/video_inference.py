@@ -1,9 +1,10 @@
 from pathlib import Path
 from typing import Dict, Any, Union, List, Optional
 import numpy as np
+import torch
 
 from app.config import settings
-from app.model.resnet18_detector import load_detector, predict_tensor, get_device, classify_probability
+from app.model.resnet18_detector import load_detector, predict_batch, get_device, classify_probability
 from app.preprocessing.mtcnn_detector import get_mtcnn, detect_faces
 from app.preprocessing.face_crop import (
     select_largest_face,
@@ -11,7 +12,7 @@ from app.preprocessing.face_crop import (
     crop_and_resize_face
 )
 from app.preprocessing.transforms import preprocess_face_tensor
-from app.video.frame_extraction import extract_video_frames
+from app.video.frame_extraction import iter_video_frames
 
 def run_video_inference(
     video_path: Union[str, Path],
@@ -22,13 +23,14 @@ def run_video_inference(
 ) -> Dict[str, Any]:
     """
     Execute full video deepfake detection pipeline:
-      1. Extract up to max_frames (default 64) evenly
-      2. For each extracted frame:
+      1. Stream up to max_frames (default 64) evenly spaced frames
+      2. For each frame:
          - Detect face with MTCNN
-         - If face present: pad, crop, resize to 224x224, normalize, predict
-         - Store frame probability
-      3. Compute mean probability across all valid face frames
-      4. Classify video into REAL / UNCERTAIN / FAKE
+         - If face present: pad, crop, resize to 224x224, normalize
+         (only the small 224x224 crop is kept; the full frame is dropped right away)
+      3. Run ResNet18 once on the whole batch of face crops
+      4. Compute mean probability across all valid face frames
+      5. Classify video into REAL / UNCERTAIN / FAKE
     """
     max_f = max_frames or settings.MAX_VIDEO_FRAMES
     device = get_device()
@@ -37,26 +39,22 @@ def run_video_inference(
     # 1. Load model first so missing model fails early before frame extraction
     detector = load_detector()
 
-    # 2. Extract representative frames from video
-    extracted_frames = extract_video_frames(
+    frame_results: List[Dict[str, Any]] = []
+    face_tensors: List[torch.Tensor] = []
+    face_result_positions: List[int] = []  # index into frame_results for each face tensor
+
+    # 2. Stream frames and collect face crops
+    for item in iter_video_frames(
         video_path=video_path,
         output_dir=output_frames_dir,
         job_id=job_id,
         max_frames=max_f
-    )
-
-    frame_results: List[Dict[str, Any]] = []
-    frame_scores: List[float] = []
-
-    # 3. Process each extracted frame
-    for item in extracted_frames:
+    ):
         frame_rgb = item["frame_rgb"]
         img_h, img_w, _ = frame_rgb.shape
 
         boxes, probs = detect_faces(frame_rgb, mtcnn=mtcnn)
-        has_face = False
-        frame_score = None
-        frame_label = None
+        face_tensor = None
 
         if boxes is not None and len(boxes) > 0:
             largest_box = select_largest_face(boxes, probs)
@@ -72,30 +70,37 @@ def run_video_inference(
                     padded_box,
                     target_size=(settings.IMAGE_SIZE, settings.IMAGE_SIZE)
                 )
-
                 if face_crop is not None:
                     face_tensor = preprocess_face_tensor(face_crop, use_clahe=use_clahe)
-                    score, label = predict_tensor(detector, face_tensor, device=device)
-                    has_face = True
-                    frame_score = score
-                    frame_label = label
-                    frame_scores.append(score)
+
+        if face_tensor is not None:
+            face_tensors.append(face_tensor)
+            face_result_positions.append(len(frame_results))
 
         frame_results.append({
             "frame_index": item["frame_index"],
             "timestamp_sec": item["timestamp_sec"],
             "frame_url": item["frame_url"],
-            "face_detected": has_face,
-            "score": frame_score,
-            "label": frame_label
+            "thumbnail_url": item["thumbnail_url"],
+            "face_detected": face_tensor is not None,
+            "score": None,
+            "label": None
         })
 
-    # 4. Handle case where no faces were detected in any frame
-    if len(frame_scores) == 0:
+    # 3. Handle case where no faces were detected in any frame
+    if len(face_tensors) == 0:
         raise ValueError(
-            f"No faces detected in any of the {len(extracted_frames)} sampled video frames. "
+            f"No faces detected in any of the {len(frame_results)} sampled video frames. "
             "Please ensure the video contains clear and visible human faces."
         )
+
+    # 4. Batched ResNet18 inference over all face crops
+    predictions = predict_batch(detector, torch.stack(face_tensors), device=device)
+    frame_scores: List[float] = []
+    for pos, (score, label) in zip(face_result_positions, predictions):
+        frame_results[pos]["score"] = score
+        frame_results[pos]["label"] = label
+        frame_scores.append(score)
 
     # 5. Calculate video-level mean probability
     mean_probability = round(float(np.mean(frame_scores)), 4)
@@ -106,6 +111,6 @@ def run_video_inference(
         "label": video_label,
         "frames": frame_results,
         "frame_scores": frame_scores,
-        "processed_frame_count": len(extracted_frames),
+        "processed_frame_count": len(frame_results),
         "detected_face_count": len(frame_scores)
     }

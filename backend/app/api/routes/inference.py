@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.storage import generate_job_id, save_upload_file, validate_and_classify_file
 from app.inference.image_inference import run_image_inference
+from app.workers.tasks import run_in_job_slot
 
 router = APIRouter(prefix="/inference", tags=["Inference"])
 
@@ -37,7 +38,9 @@ async def direct_image_predict(file: UploadFile = File(...)):
     saved_path, _ = await save_upload_file(temp_id, file)
 
     try:
-        result = run_image_inference(image_path=saved_path)
+        # Run the blocking MTCNN + ResNet pipeline in a worker thread so the event loop
+        # (and every other request, e.g. job polling) is not frozen while it runs.
+        result = await run_in_job_slot(run_image_inference, saved_path)
         return DirectPredictResponse(
             filename=file.filename,
             type="image",

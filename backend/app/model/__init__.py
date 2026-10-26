@@ -3,7 +3,8 @@ from app.model.resnet18_detector import (
     load_detector,
     get_device,
     classify_probability,
-    predict_tensor
+    predict_tensor,
+    predict_batch
 )
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "load_detector",
     "get_device",
     "classify_probability",
-    "predict_tensor"
+    "predict_tensor",
+    "predict_batch"
 ]

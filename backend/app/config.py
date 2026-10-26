@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     MIN_FACE_SIZE: int = 20
     MTCNN_THRESHOLDS: List[float] = [0.6, 0.7, 0.7]
     FACE_PADDING: float = 0.2
+    # Images/frames larger than this (longest side, px) are downscaled for MTCNN detection only;
+    # the face crop is still taken from the full-resolution image.
+    DETECTION_MAX_SIDE: int = 1280
 
     # Classification Thresholds (REAL < LOWER_THRESHOLD, FAKE > UPPER_THRESHOLD, else UNCERTAIN)
     LOWER_THRESHOLD: float = 0.4
@@ -26,6 +29,12 @@ class Settings(BaseSettings):
 
     # Video Processing
     MAX_VIDEO_FRAMES: int = 64
+    THUMBNAIL_WIDTH: int = 320
+
+    # Uploads & Job Processing
+    MAX_UPLOAD_MB: int = 200
+    MAX_CONCURRENT_JOBS: int = 1
+    DELETE_UPLOAD_AFTER_PROCESSING: bool = True
 
     # Optional CLAHE Preprocessing
     USE_CLAHE: bool = False

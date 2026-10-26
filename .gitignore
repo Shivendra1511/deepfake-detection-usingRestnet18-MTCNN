@@ -41,6 +41,9 @@ backend/frames/*
 backend/results/*
 !backend/results/.gitkeep
 
+# Cached MTCNN face crops created by training/train.py (re-generated automatically)
+dataset/_face_cache/
+
 # Checkpoints
 backend/data/*.pt
 !backend/data/.gitkeep

@@ -58,6 +58,9 @@ OUTPUT_DIR = Path("/kaggle/working")
 MODEL_PATH = OUTPUT_DIR / "detector.pt"
 RESULTS_DIR = OUTPUT_DIR / "training_plots"
 EVAL_JSON_PATH = OUTPUT_DIR / "evaluation_report.json"
+# /kaggle/input is read-only, so cached face crops live in /kaggle/working
+FACE_CACHE_DIR = OUTPUT_DIR / "face_cache"
+DETECTION_MAX_SIDE = 1280  # downscale big images for MTCNN detection only
 
 EPOCHS = 10
 BATCH_SIZE = 32          # Kaggle GPU can usually handle 32; drop to 16 if OOM
@@ -67,7 +70,7 @@ SEED = 42
 IMAGE_SIZE = 224
 EXTRACT_FACE = True      # must match backend inference (MTCNN + 20% padding)
 FACE_PADDING = 0.2
-NUM_WORKERS = 2          # Kaggle Linux; 0 if DataLoader hangs
+NUM_WORKERS = 2          # safe now: workers only read cached crops, MTCNN runs once in the main process
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -197,7 +200,56 @@ def get_val_transforms(image_size: int = 224):
 # 3. Dataset — MTCNN largest face + 20% padding (same as local training)
 # ---------------------------------------------------------------------------
 
+def extract_padded_face(pil_image, mtcnn, padding: float = 0.2, max_side: int = DETECTION_MAX_SIDE):
+    """Largest MTCNN face + padding, cropped from full resolution. Returns None if no face."""
+    from PIL import Image
+
+    img_w, img_h = pil_image.size
+    scale = 1.0
+    detect_img = pil_image
+    if max(img_w, img_h) > max_side:
+        scale = max_side / float(max(img_w, img_h))
+        detect_img = pil_image.resize(
+            (max(1, int(round(img_w * scale))), max(1, int(round(img_h * scale)))),
+            Image.BILINEAR,
+        )
+
+    boxes, _probs = mtcnn.detect(detect_img)
+    if boxes is None or len(boxes) == 0:
+        return None
+    boxes = boxes / scale
+
+    largest_box = None
+    max_area = -1.0
+    for box in boxes:
+        x1, y1, x2, y2 = box
+        area = max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
+        if area > max_area:
+            max_area = area
+            largest_box = box
+    if largest_box is None:
+        return None
+
+    x1, y1, x2, y2 = largest_box
+    pad_x = int(math.floor((x2 - x1) * padding))
+    pad_y = int(math.floor((y2 - y1) * padding))
+    new_x1 = max(0, int(round(x1 - pad_x)))
+    new_y1 = max(0, int(round(y1 - pad_y)))
+    new_x2 = min(img_w, int(round(x2 + pad_x)))
+    new_y2 = min(img_h, int(round(y2 + pad_y)))
+    if new_x2 > new_x1 and new_y2 > new_y1:
+        return pil_image.crop((new_x1, new_y1, new_x2, new_y2))
+    return None
+
+
 class DeepfakeDataset(Dataset):
+    """
+    Faces are cropped ONCE in the main process and cached as PNGs in cache_dir.
+    Workers only read cached crops, so they never touch CUDA (the old version ran
+    MTCNN on CUDA inside forked workers, which failed and silently fell back to
+    the full uncropped image). Images with no detectable face are skipped.
+    """
+
     def __init__(
         self,
         root_dir: Path,
@@ -205,74 +257,100 @@ class DeepfakeDataset(Dataset):
         extract_face: bool = True,
         device=None,
         padding: float = 0.2,
+        cache_dir: Optional[Path] = None,
     ):
         import torch
-        from facenet_pytorch import MTCNN
 
         self.root_dir = Path(root_dir)
         self.transform = transform
         self.extract_face = extract_face
         self.padding = padding
         self.device = device or torch.device("cpu")
+        self.cache_dir = Path(cache_dir) if cache_dir else FACE_CACHE_DIR / self.root_dir.name
         self.samples: List[Tuple[Path, float]] = []
         self._load_samples()
-        self.mtcnn = None
         if self.extract_face:
-            self.mtcnn = MTCNN(
-                image_size=224,
-                margin=0,
-                min_face_size=20,
-                thresholds=[0.6, 0.7, 0.7],
-                keep_all=True,
-                post_process=False,
-                device=self.device,
-            )
+            self.samples = self._build_face_cache(self.samples)
 
     def _load_samples(self) -> None:
         real_dir = self.root_dir / "real"
         fake_dir = self.root_dir / "fake"
         if real_dir.is_dir():
-            for p in real_dir.iterdir():
+            for p in sorted(real_dir.iterdir()):
                 if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS:
                     self.samples.append((p, 0.0))
         if fake_dir.is_dir():
-            for p in fake_dir.iterdir():
+            for p in sorted(fake_dir.iterdir()):
                 if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS:
                     self.samples.append((p, 1.0))
 
+    def _build_face_cache(self, samples):
+        import torch
+        from PIL import Image
+        from facenet_pytorch import MTCNN
+
+        mtcnn = None
+        cached: List[Tuple[Path, float]] = []
+        skipped_no_face = 0
+        skipped_errors = 0
+        total = len(samples)
+
+        for i, (img_path, label) in enumerate(samples, start=1):
+            class_dir = "real" if label == 0.0 else "fake"
+            crop_path = self.cache_dir / class_dir / f"{img_path.name}.png"
+            no_face_marker = crop_path.with_suffix(".noface")
+
+            if crop_path.exists():
+                cached.append((crop_path, label))
+                continue
+            if no_face_marker.exists():
+                skipped_no_face += 1
+                continue
+
+            if mtcnn is None:
+                mtcnn = MTCNN(
+                    image_size=224,
+                    margin=0,
+                    min_face_size=20,
+                    thresholds=[0.6, 0.7, 0.7],
+                    keep_all=True,
+                    post_process=False,
+                    device=self.device,
+                )
+                print(f"Extracting face crops for {self.root_dir} -> {self.cache_dir} (runs once)...")
+
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with Image.open(img_path) as img:
+                    face = extract_padded_face(img.convert("RGB"), mtcnn, padding=self.padding)
+            except Exception as e:
+                skipped_errors += 1
+                print(f"  [WARN] Could not process {img_path}: {e}")
+                continue
+
+            if face is None:
+                skipped_no_face += 1
+                no_face_marker.touch()
+                continue
+
+            face.save(crop_path)
+            cached.append((crop_path, label))
+            if i % 500 == 0:
+                print(f"  {i}/{total} images processed")
+
+        if skipped_no_face or skipped_errors:
+            print(
+                f"  {self.root_dir.name}: skipped {skipped_no_face} image(s) with no detectable face "
+                f"and {skipped_errors} unreadable image(s)."
+            )
+
+        del mtcnn
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return cached
+
     def __len__(self) -> int:
         return len(self.samples)
-
-    def _extract_padded_face(self, pil_image):
-        if self.mtcnn is None:
-            return pil_image
-        try:
-            boxes, _probs = self.mtcnn.detect(pil_image)
-            if boxes is None or len(boxes) == 0:
-                return pil_image
-            largest_box = None
-            max_area = -1.0
-            for box in boxes:
-                x1, y1, x2, y2 = box
-                area = max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
-                if area > max_area:
-                    max_area = area
-                    largest_box = box
-            if largest_box is None:
-                return pil_image
-            img_w, img_h = pil_image.size
-            x1, y1, x2, y2 = largest_box
-            pad_x = int(math.floor((x2 - x1) * self.padding))
-            pad_y = int(math.floor((y2 - y1) * self.padding))
-            new_x1 = max(0, int(round(x1 - pad_x)))
-            new_y1 = max(0, int(round(y1 - pad_y)))
-            new_x2 = min(img_w, int(round(x2 + pad_x)))
-            new_y2 = min(img_h, int(round(y2 + pad_y)))
-            if new_x2 > new_x1 and new_y2 > new_y1:
-                return pil_image.crop((new_x1, new_y1, new_x2, new_y2))
-            return pil_image
-        except Exception:
-            return pil_image
 
     def __getitem__(self, idx: int):
         from PIL import Image
@@ -282,8 +360,6 @@ class DeepfakeDataset(Dataset):
         img_path, label = self.samples[idx]
         with Image.open(img_path) as img:
             img = img.convert("RGB")
-            if self.extract_face:
-                img = self._extract_padded_face(img)
             tensor = self.transform(img) if self.transform is not None else T.ToTensor()(img)
         return tensor, torch.tensor([label], dtype=torch.float32)
 
@@ -537,7 +613,7 @@ def evaluate(model_path: Path, val_dir: Path, device) -> None:
             all_preds.extend((probs >= 0.5).astype(int).tolist())
             all_labels.extend(labels.cpu().numpy().flatten().astype(int).tolist())
 
-    cm = confusion_matrix(all_labels, all_preds).tolist()
+    cm = confusion_matrix(all_labels, all_preds, labels=[0, 1]).tolist()
     report = {
         "samples_evaluated": len(val_dataset),
         "validation_loss": round(total_loss / len(val_dataset), 4),

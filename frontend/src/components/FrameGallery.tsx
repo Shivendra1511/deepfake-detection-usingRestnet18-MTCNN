@@ -54,7 +54,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames }) => {
             >
               <div className="frame-image-wrapper">
                 <img
-                  src={getMediaUrl(frame.frame_url)}
+                  src={getMediaUrl(frame.thumbnail_url || frame.frame_url)}
                   alt={`Frame ${frame.frame_index}`}
                   loading="lazy"
                   className="frame-thumbnail"

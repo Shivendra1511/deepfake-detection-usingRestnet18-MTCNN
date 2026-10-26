@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 import logging
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
@@ -30,6 +30,15 @@ def get_jobs_collection() -> AsyncIOMotorCollection:
     db = get_database()
     return db[settings.MONGO_JOBS_COLLECTION]
 
+def utc_now_iso() -> str:
+    """Timezone-aware UTC timestamp (ends with +00:00) so browsers convert it to local time correctly."""
+    return datetime.now(timezone.utc).isoformat()
+
+async def ensure_indexes() -> None:
+    """Create a unique index on job_id so status polling does not scan the whole collection."""
+    collection = get_jobs_collection()
+    await collection.create_index("job_id", unique=True)
+
 async def check_db_connection() -> bool:
     """
     Check if local MongoDB server is responding.
@@ -48,7 +57,7 @@ async def create_job(job_id: str, filename: str, file_type: str) -> Dict[str, An
     Insert a newly submitted job into MongoDB with 'queued' status.
     """
     collection = get_jobs_collection()
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = utc_now_iso()
     doc = {
         "job_id": job_id,
         "filename": filename,
@@ -81,7 +90,7 @@ async def update_job_status(job_id: str, status: str) -> bool:
     collection = get_jobs_collection()
     res = await collection.update_one(
         {"job_id": job_id},
-        {"$set": {"status": status, "updated_at": datetime.utcnow().isoformat()}}
+        {"$set": {"status": status, "updated_at": utc_now_iso()}}
     )
     return res.modified_count > 0
 
@@ -98,7 +107,7 @@ async def update_job_result(
     Update job with final inference results and mark completed.
     """
     collection = get_jobs_collection()
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = utc_now_iso()
     update_data = {
         "status": "completed",
         "score": round(score, 4),
@@ -127,7 +136,7 @@ async def update_job_failed(job_id: str, error_message: str) -> bool:
             "$set": {
                 "status": "failed",
                 "error_message": error_message,
-                "updated_at": datetime.utcnow().isoformat()
+                "updated_at": utc_now_iso()
             }
         }
     )

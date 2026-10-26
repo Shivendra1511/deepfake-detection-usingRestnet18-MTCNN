@@ -1,6 +1,7 @@
 import os
+import threading
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, Union
+from typing import Optional, Tuple, Dict, Any, Union, List
 import torch
 import torch.nn as nn
 from torchvision.models import resnet18, ResNet18_Weights
@@ -45,16 +46,24 @@ def get_device() -> torch.device:
 
 # Singleton cache for inference model instance
 _CACHED_DETECTOR: Optional[ResNet18Detector] = None
+# Inference runs in worker threads; the lock stops two threads loading the model at once
+_DETECTOR_LOCK = threading.Lock()
 
 def load_detector(model_path: Optional[str] = None, force_reload: bool = False) -> ResNet18Detector:
     """
     Load the trained ResNet18Detector checkpoint from disk.
     If detector.pt does not exist, raises FileNotFoundError with a clear message.
     """
-    global _CACHED_DETECTOR
-
     if _CACHED_DETECTOR is not None and not force_reload:
         return _CACHED_DETECTOR
+
+    with _DETECTOR_LOCK:
+        if _CACHED_DETECTOR is not None and not force_reload:
+            return _CACHED_DETECTOR
+        return _load_detector_unlocked(model_path)
+
+def _load_detector_unlocked(model_path: Optional[str]) -> ResNet18Detector:
+    global _CACHED_DETECTOR
 
     target_path = Path(model_path if model_path else settings.MODEL_PATH).resolve()
 
@@ -111,20 +120,34 @@ def predict_tensor(
     Applies torch.sigmoid(logit) to obtain fake probability.
     Returns: (probability, label)
     """
-    if device is None:
-        device = get_device()
-
     if tensor.dim() == 3:
         # Add batch dimension: (3, 224, 224) -> (1, 3, 224, 224)
         tensor = tensor.unsqueeze(0)
 
-    tensor = tensor.to(device)
+    return predict_batch(model, tensor, device=device)[0]
 
-    with torch.no_grad():
-        logit = model(tensor)
-        prob = torch.sigmoid(logit).item()
+def predict_batch(
+    model: ResNet18Detector,
+    batch: torch.Tensor,
+    device: Optional[torch.device] = None,
+    chunk_size: int = 32
+) -> List[Tuple[float, str]]:
+    """
+    Run inference on a batch of preprocessed face tensors (N, 3, 224, 224) in chunks.
+    One forward pass per chunk is much faster than N separate passes (especially on GPU).
+    Returns: [(probability, label), ...] in input order.
+    """
+    if device is None:
+        device = get_device()
 
-    score = round(float(prob), 4)
-    label = classify_probability(score)
+    results: List[Tuple[float, str]] = []
+    with torch.inference_mode():
+        for start in range(0, batch.shape[0], chunk_size):
+            chunk = batch[start:start + chunk_size].to(device)
+            logits = model(chunk).float()
+            probs = torch.sigmoid(logits).view(-1).cpu().tolist()
+            for prob in probs:
+                score = round(float(prob), 4)
+                results.append((score, classify_probability(score)))
 
-    return score, label
+    return results

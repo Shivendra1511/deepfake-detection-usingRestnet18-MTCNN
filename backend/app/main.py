@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.api.routes import upload, jobs, inference
-from app.database.mongodb import check_db_connection
+from app.database.mongodb import check_db_connection, ensure_indexes
 from app.storage import ensure_directories
 
 logging.basicConfig(
@@ -26,6 +26,10 @@ async def lifespan(app: FastAPI):
     db_connected = await check_db_connection()
     if db_connected:
         logger.info(f"Successfully connected to MongoDB at {settings.MONGO_URL} (db: {settings.MONGO_DB}).")
+        try:
+            await ensure_indexes()
+        except Exception as e:
+            logger.warning(f"Could not create MongoDB index on job_id: {e}")
     else:
         logger.warning(
             f"Could not connect to MongoDB at {settings.MONGO_URL}. "

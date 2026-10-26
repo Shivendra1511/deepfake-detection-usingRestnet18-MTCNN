@@ -124,7 +124,8 @@ def main():
     prec = precision_score(all_labels, all_preds, zero_division=0) * 100.0
     rec = recall_score(all_labels, all_preds, zero_division=0) * 100.0
     f1 = f1_score(all_labels, all_preds, zero_division=0) * 100.0
-    cm = confusion_matrix(all_labels, all_preds).tolist()
+    # labels=[0, 1] keeps the matrix 2x2 even if the set contains only one class
+    cm = confusion_matrix(all_labels, all_preds, labels=[0, 1]).tolist()
 
     report = {
         "samples_evaluated": len(val_dataset),
@@ -134,10 +135,10 @@ def main():
         "recall_percent": round(rec, 2),
         "f1_score_percent": round(f1, 2),
         "confusion_matrix": {
-            "true_real_pred_real (TN)": cm[0][0] if len(cm) > 1 else cm[0][0],
-            "true_real_pred_fake (FP)": cm[0][1] if len(cm) > 1 else 0,
-            "true_fake_pred_real (FN)": cm[1][0] if len(cm) > 1 else 0,
-            "true_fake_pred_fake (TP)": cm[1][1] if len(cm) > 1 else 0
+            "true_real_pred_real (TN)": cm[0][0],
+            "true_real_pred_fake (FP)": cm[0][1],
+            "true_fake_pred_real (FN)": cm[1][0],
+            "true_fake_pred_fake (TP)": cm[1][1]
         }
     }
 
@@ -152,8 +153,8 @@ def main():
     print(f"  F1 Score:           {report['f1_score_percent']:.2f}%")
     print("-" * 45)
     print("  Confusion Matrix:")
-    print(f"    [[TN: {cm[0][0]}, FP: {cm[0][1] if len(cm) > 1 else 0}],")
-    print(f"     [FN: {cm[1][0] if len(cm) > 1 else 0}, TP: {cm[1][1] if len(cm) > 1 else 0}]]")
+    print(f"    [[TN: {cm[0][0]}, FP: {cm[0][1]}],")
+    print(f"     [FN: {cm[1][0]}, TP: {cm[1][1]}]]")
     print("=" * 45)
 
     out_json_path = Path(args.output_json)

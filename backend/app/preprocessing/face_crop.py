@@ -77,7 +77,11 @@ def crop_and_resize_face(
     if face_crop.size == 0 or face_crop.shape[0] == 0 or face_crop.shape[1] == 0:
         return None
 
-    resized = cv2.resize(face_crop, target_size, interpolation=cv2.INTER_LINEAR)
+    # INTER_AREA when shrinking avoids aliasing and is closer to the antialiased PIL resize
+    # used during training; INTER_LINEAR is fine when enlarging small faces.
+    shrinking = face_crop.shape[1] > target_size[0] or face_crop.shape[0] > target_size[1]
+    interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
+    resized = cv2.resize(face_crop, target_size, interpolation=interpolation)
     return resized
 
 def apply_clahe(

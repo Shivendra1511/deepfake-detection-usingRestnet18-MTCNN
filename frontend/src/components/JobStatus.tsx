@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, CheckCircle, AlertOctagon, Clock, Copy, Check } from 'lucide-react';
 import { getJobStatus, getJobResult, JobStatusResponse, JobResultResponse } from '../services/api';
 
@@ -13,22 +13,34 @@ export const JobStatus: React.FC<JobStatusProps> = ({ jobId, onCompleted, onRese
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
 
+  // Keep the latest callback in a ref so a new inline function from the parent
+  // does not restart polling on every parent re-render.
+  const onCompletedRef = useRef(onCompleted);
+  useEffect(() => {
+    onCompletedRef.current = onCompleted;
+  }, [onCompleted]);
+
   useEffect(() => {
     let isMounted = true;
     let timerId: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveErrors = 0;
+    const POLL_INTERVAL_MS = 2000;
+    const MAX_CONSECUTIVE_ERRORS = 5;
 
     const poll = async () => {
       try {
         const data = await getJobStatus(jobId);
         if (!isMounted) return;
 
+        consecutiveErrors = 0;
+        setErrorMessage(null);
         setStatusData(data);
 
         if (data.status === 'completed') {
           // Fetch complete payload including frame breakdown
           const fullResult = await getJobResult(jobId);
           if (isMounted) {
-            onCompleted(fullResult);
+            onCompletedRef.current(fullResult);
           }
           return;
         }
@@ -39,11 +51,19 @@ export const JobStatus: React.FC<JobStatusProps> = ({ jobId, onCompleted, onRese
         }
 
         // Continue polling every 2 seconds while queued or processing
-        timerId = setTimeout(poll, 2000);
+        timerId = setTimeout(poll, POLL_INTERVAL_MS);
       } catch (err: any) {
         if (!isMounted) return;
         const msg = err.response?.data?.detail || err.message || 'Error checking job status.';
-        setErrorMessage(msg);
+        consecutiveErrors += 1;
+
+        // 404 means the job does not exist; anything else may be a temporary
+        // network/server hiccup, so retry a few times before giving up.
+        if (err.response?.status === 404 || consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          setErrorMessage(msg);
+          return;
+        }
+        timerId = setTimeout(poll, POLL_INTERVAL_MS * consecutiveErrors);
       }
     };
 
@@ -53,7 +73,7 @@ export const JobStatus: React.FC<JobStatusProps> = ({ jobId, onCompleted, onRese
       isMounted = false;
       if (timerId) clearTimeout(timerId);
     };
-  }, [jobId, onCompleted]);
+  }, [jobId]);
 
   const copyJobId = () => {
     navigator.clipboard.writeText(jobId);

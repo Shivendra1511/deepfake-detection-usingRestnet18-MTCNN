@@ -1,6 +1,6 @@
 import React from 'react';
 import { ShieldCheck, ShieldAlert, AlertTriangle, FileText, Calendar, Film, Image as ImageIcon } from 'lucide-react';
-import { JobResultResponse } from '../services/api';
+import { JobResultResponse, parseServerDate } from '../services/api';
 
 interface ResultCardProps {
   result: JobResultResponse;
@@ -125,7 +125,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onReset }) => {
               <Calendar size={14} className="mr-1 inline" /> Analyzed On
             </span>
             <span className="detail-value">
-              {new Date(result.updated_at).toLocaleString()}
+              {parseServerDate(result.updated_at).toLocaleString()}
             </span>
           </div>
         </div>
